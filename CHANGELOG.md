@@ -1,26 +1,22 @@
 # Changelog
 
-## 0.1.2 — Unreleased
+## 0.1.2 — 2026-09-10
 
-- Keeps `0.1.2` as the active development version because no `0.1.2` GitHub release has been published yet.
-- Reworked native **Toggle Console** handling after runtime testing showed that the first `0.1.2` startup-only handle synchronization was not sufficient.
-- Targets the actual MeFriendos WindowsGSM environment: `Raziel7893/WindowsGSM v1.25.1.22`.
-- Corrected the earlier upstream assumption about `RedirectStandardOutput`: Raziel's `v1.25.1.22` Toggle Console implementation has that guard commented out and instead persists a `ShowConsole` state.
-- Refreshes the Arma `Process` object before reading `MainWindowHandle` so a cached early window handle is not trusted indefinitely.
-- Adds explicit top-level window discovery with `EnumWindows` / `GetWindowThreadProcessId` for windows owned by the running Arma process.
-- Avoids selecting arbitrary hidden helper windows during the EnumWindows fallback; `ConsoleWindowClass` is preferred, otherwise only a visible process-owned window is accepted before falling through to console discovery.
-- Keeps `AttachConsole` / `GetConsoleWindow` as an additional console-specific fallback instead of using it as the only repair path.
-- Rejects `PseudoConsoleWindow` as a native Toggle Console target because it may not represent a safe independently visible window.
-- Continuously monitors the resolved native window for the lifetime of the Arma process instead of stopping after a short startup window.
-- Synchronizes a valid resolved HWND into the matching WindowsGSM `ServerMetadata.MainWindow` and persists it to the server's `windowsIntPtr` cache.
-- Detects Raziel's `ShowConsole` state through reflection and directly applies the requested show/hide state to the resolved native Arma window.
-- Uses reflection for `ShowConsole` so the source does not hard-depend on the Raziel-only field at compile time; on WindowsGSM builds without it, normal handle synchronization remains available.
-- Adds `arma3-toggle-console.log` in the WindowsGSM server cache folder. It records the Arma PID, WindowsGSM version, discovery path, HWND changes, ShowConsole synchronization and AttachConsole errors.
-- Keeps the read-only RPT-based Embedded Console implementation introduced in `0.1.1` unchanged.
-- Keeps graceful-stop handling conservative: a normal process-window close is attempted first; a classic console window may receive `WM_CLOSE`; pseudo-terminal windows are not deliberately closed by the plugin.
-- Updated README and installation documentation to distinguish the released `0.1.1` build from the unreleased `0.1.2` development build and to document `Raziel7893/WindowsGSM v1.25.1.22` behavior.
-- Source-reviewed the implementation against the exact `v1.25.1.22` Toggle Console, `ShowConsole`, server-metadata and cache flow.
-- **Runtime validation passed on 2026-09-10 with Raziel7893/WindowsGSM v1.25.1.22 and a real Arma 3 Dedicated Server. Toggle Console successfully shows and hides the native console and normal server operation remains intact.**
+- Fixed WindowsGSM **Toggle Console** handling for Arma 3 Dedicated Server.
+- Added refreshed native window-handle detection instead of relying on an early cached `Process.MainWindowHandle` value.
+- Added top-level window discovery with `EnumWindows` / `GetWindowThreadProcessId` for windows owned by the running Arma process.
+- Prefers `ConsoleWindowClass` and otherwise only accepts a visible process-owned fallback window.
+- Added `AttachConsole` / `GetConsoleWindow` as an additional console-specific fallback.
+- Rejects `PseudoConsoleWindow` as a native Toggle Console target.
+- Continuously monitors the resolved native window for the lifetime of the Arma process so stale or replaced handles can be repaired.
+- Synchronizes the resolved HWND with WindowsGSM `ServerMetadata.MainWindow` and the server's `windowsIntPtr` cache.
+- Added support for Raziel WindowsGSM's persistent `ShowConsole` state and applies the requested show/hide state directly to the resolved native Arma window.
+- Uses reflection for `ShowConsole` to retain compatibility with WindowsGSM builds that do not expose that field.
+- Added `arma3-toggle-console.log` in the WindowsGSM server cache folder for native window diagnostics.
+- Keeps the read-only RPT-based Embedded Console implementation introduced in `0.1.1`.
+- Keeps graceful-stop handling conservative: a normal process-window close is attempted first, a classic console window may receive `WM_CLOSE`, and pseudo-terminal windows are not deliberately closed.
+- Updated documentation for Raziel7893/WindowsGSM `v1.25.1.22`.
+- Runtime-tested successfully with Raziel7893/WindowsGSM `v1.25.1.22` and a real Arma 3 Dedicated Server. Toggle Console show/hide and normal server operation passed.
 
 ## 0.1.1 — 2026-09-10
 
@@ -33,14 +29,14 @@
 - Detects `-noLogs` and reports that the embedded console has no RPT source without blocking normal server startup.
 - Keeps the native Arma process unredirected so WindowsGSM can retain normal window handling and the graceful-close fallback.
 - Rechecked the existing `arma3server_x64.exe`, SteamCMD, firewall-cleanup and `100`-port increment behavior.
-- Updated README and installation documentation to describe the actual RPT-based console implementation.
-- Runtime-tested the RPT-based embedded console with WindowsGSM `v1.25.1.21` before release.
+- Updated README and installation documentation to describe the RPT-based console implementation.
+- Runtime-tested the RPT-based embedded console with WindowsGSM `v1.25.1.21`.
 
 ## 0.1.0 — 2026-09-10
 
 - Created the MeFriendos build based on WindowsGSM.ARMA3 by BattlefieldDuck.
 - Uses the 64-bit `arma3server_x64.exe` dedicated-server executable.
-- Added an initial read-only embedded-console implementation using ArmA 3 stdout and stderr. This approach was replaced in `0.1.1` because it does not reliably provide Arma server output on Windows.
+- Added an initial read-only embedded-console implementation using Arma 3 stdout and stderr. This approach was replaced in `0.1.1` because it does not reliably provide Arma server output on Windows.
 - Keeps the native server console available so WindowsGSM can request a normal window close before falling back to process termination.
 - Replaced immediate-only process termination with graceful-close-first shutdown behavior.
 - Removes WindowsGSM's automatic firewall application exception for the exact Arma 3 server executable before launch.
