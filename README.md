@@ -17,8 +17,6 @@
 
 This plugin installs, updates and runs the Arma 3 Dedicated Server through SteamCMD. The MeFriendos build keeps the familiar WindowsGSM workflow while adding 64-bit server startup, a safer firewall policy, a read-only RPT-backed embedded console and repaired native **Toggle Console** handling.
 
-> **Development status:** `main` currently contains the unreleased `0.1.2` build. The latest published plugin release is `0.1.1`. **0.1.2 has now been successfully runtime-tested with Raziel7893/WindowsGSM v1.25.1.22 and a real Arma 3 Dedicated Server.** Both showing and hiding the native console through Toggle Console work correctly in the MeFriendos environment.
-
 ## Features
 
 - Installs and updates the official Arma 3 Dedicated Server through SteamCMD.
