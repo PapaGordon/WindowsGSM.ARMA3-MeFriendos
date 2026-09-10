@@ -1,4 +1,4 @@
-VERSION 0.1.2
+VERSION 0.1.2 (UNRELEASED DEVELOPMENT BUILD)
 
 WindowsGSM.ARMA3 - MeFriendos build
 ====================================
@@ -7,15 +7,31 @@ Purpose
 -------
 WindowsGSM plugin for Arma 3 Dedicated Server using arma3server_x64.exe.
 
+Release status
+--------------
+The latest published GitHub release is 0.1.1.
+The main branch currently contains the unreleased 0.1.2 development build for Toggle Console testing.
+
 Installation
 ------------
-1. Copy the complete ARMA3.cs folder into the WindowsGSM plugins folder.
-2. Reload plugins or restart WindowsGSM.
-3. Add "Arma 3 Dedicated Server" in WindowsGSM.
-4. Install/update through SteamCMD with the Steam account requested by WindowsGSM.
-5. Configure server.cfg, profiles, missions and mod startup parameters.
-6. Configure only the required Arma UDP ports manually in Windows Firewall/router/provider firewall.
-7. Start the server.
+Stable release:
+1. Download the latest published GitHub release.
+2. Copy the complete ARMA3.cs folder into the WindowsGSM plugins folder.
+3. Reload plugins or restart WindowsGSM.
+4. Add "Arma 3 Dedicated Server" in WindowsGSM.
+5. Install/update through SteamCMD with the Steam account requested by WindowsGSM.
+6. Configure server.cfg, profiles, missions and mod startup parameters.
+7. Configure only the required Arma UDP ports manually in Windows Firewall/router/provider firewall.
+8. Start the server.
+
+Testing unreleased 0.1.2:
+1. Download the source ZIP from the repository main branch.
+2. Replace the installed ARMA3.cs plugin folder with the main-branch version.
+3. Reload plugins or restart WindowsGSM.
+4. Stop and start the Arma server so the new window monitor is attached to the new process.
+5. Wait until WindowsGSM reports the server as started.
+6. Test Toggle Console twice: show, then hide.
+7. If it still fails, inspect the server cache file arma3-toggle-console.log.
 
 Default parameters
 ------------------
@@ -32,7 +48,7 @@ WindowsGSM has two separate console features for this plugin:
    Read-only Arma output mirrored from the active .rpt file into WindowsGSM.
 
 2. Toggle Console
-   Shows or hides the native Windows console window of arma3server_x64.exe.
+   Shows or hides the native Arma/console-host window selected through WindowsGSM's stored window handle.
 
 Embedded Console
 ----------------
@@ -46,23 +62,35 @@ If -noLogs is enabled, the server can still start but there is no RPT source for
 
 Standard input is intentionally not redirected. Use in-game # admin commands or RCon for administration.
 
-Toggle Console fix in 0.1.2
----------------------------
-Version 0.1.2 fixes cases where WindowsGSM's Toggle Console button does nothing while the Arma server itself is running normally.
+Toggle Console development fix in 0.1.2
+----------------------------------------
+The first unreleased 0.1.2 attempt used a short startup-only AttachConsole/GetConsoleWindow synchronization. Runtime testing showed that this was not sufficient, so the implementation has been replaced while keeping the version number at 0.1.2.
 
-The plugin now resolves the native console window after startup and synchronizes its window handle with WindowsGSM's server metadata after WindowsGSM has registered the actual Arma process. The handle is also written to the server's windowsIntPtr cache.
+The current development build now:
+- calls Process.Refresh() before trusting Process.MainWindowHandle;
+- explicitly searches top-level windows belonging to the Arma PID;
+- uses AttachConsole/GetConsoleWindow only as an additional console fallback;
+- recognizes PseudoConsoleWindow hosting and attempts to use its root owner;
+- writes a valid result to WindowsGSM ServerMetadata.MainWindow and windowsIntPtr;
+- continues monitoring while the Arma process is alive instead of stopping after 15 seconds;
+- creates arma3-toggle-console.log in the server cache directory for diagnostics.
 
-This avoids relying only on an early Process.MainWindowHandle value that can be missing or stale while Arma is still creating its native console window.
+RedirectStandardOutput remains disabled. WindowsGSM intentionally ignores Toggle Console for processes whose standard output is redirected.
 
-RedirectStandardOutput remains disabled. This is required because WindowsGSM intentionally ignores Toggle Console for processes whose standard output is redirected.
+Diagnostic file
+---------------
+If Toggle Console still does nothing, check:
 
-After updating to 0.1.2, restart the Arma server so the native console handle can be detected and registered for the new process.
+<WindowsGSM>\servers\<server-id>\cache\arma3-toggle-console.log
+
+The file records the Arma PID, the discovery method, old/new HWND values and an AttachConsole Win32 error when applicable.
 
 Stop behavior
 -------------
-WindowsGSM first tries the normal process window close path.
-If no usable Process.MainWindowHandle is available, the plugin resolves the native Arma console window and posts a normal WM_CLOSE request to it.
-It waits up to 20 seconds before falling back to terminating the process.
+The plugin refreshes the process and first tries the normal process-window close path.
+If that is unavailable, a classic console window may receive WM_CLOSE.
+PseudoConsoleWindow/terminal-host windows are deliberately not closed by this fallback.
+The plugin waits up to 20 seconds after a successful close request before falling back to terminating the process.
 
 Firewall behavior
 -----------------
@@ -98,7 +126,7 @@ Validation
 ----------
 The v0.1.1 RPT-based embedded console was runtime-tested with WindowsGSM v1.25.1.21 and a running Arma 3 Dedicated Server before release.
 
-The v0.1.2 Toggle Console repair has been source-reviewed against WindowsGSM's current Toggle Console, server metadata and cache flow. Final real-world validation still requires starting an Arma server on Windows and confirming that Toggle Console shows and hides the native window correctly.
+The current unreleased v0.1.2 Toggle Console implementation has been source-reviewed against WindowsGSM's current Toggle Console, server metadata and cache flow and the relevant .NET/Win32 window APIs. Final real-world validation still requires starting an Arma server on Windows and confirming that Toggle Console shows and hides the intended native window.
 
 Important
 ---------
@@ -107,8 +135,9 @@ Important
 - The plugin does not open game ports automatically.
 - Existing custom startup parameters are passed through unchanged.
 - Embedded Console is read-only.
-- Toggle Console controls the native Arma console window and is separate from Embedded Console.
-- -noLogs disables the RPT source used by Embedded Console, not the native Toggle Console window.
+- Toggle Console is separate from Embedded Console.
+- -noLogs disables the RPT source used by Embedded Console, not the native Toggle Console path.
+- 0.1.2 is not released yet; main is the development/test source.
 - Back up server configuration, profiles and missions before major updates.
 
 Credits
