@@ -17,6 +17,7 @@ namespace WindowsGSM.Plugins
     public class ARMA3 : SteamCMDAgent
     {
         private const uint WM_CLOSE = 0x0010;
+        private static readonly object ConsoleAttachLock = new object();
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool AttachConsole(uint dwProcessId);
@@ -43,7 +44,7 @@ namespace WindowsGSM.Plugins
             name = "WindowsGSM.ARMA3",
             author = "MeFriendos",
             description = "WindowsGSM plugin for Arma 3 Dedicated Server (MeFriendos build)",
-            version = "0.1.1",
+            version = "0.1.2",
             url = "https://github.com/PapaGordon/WindowsGSM.ARMA3-MeFriendos",
             color = "#9eff99"
         };
@@ -525,6 +526,124 @@ namespace WindowsGSM.Plugins
             }
         }
 
+        private static IntPtr GetProcessConsoleWindow(Process process)
+        {
+            if (process == null)
+                return IntPtr.Zero;
+
+            lock (ConsoleAttachLock)
+            {
+                try
+                {
+                    if (process.HasExited)
+                        return IntPtr.Zero;
+
+                    // Do not detach WindowsGSM from a console it already owns.
+                    if (GetConsoleWindow() != IntPtr.Zero)
+                        return IntPtr.Zero;
+
+                    if (!AttachConsole((uint)process.Id))
+                        return IntPtr.Zero;
+
+                    try
+                    {
+                        return GetConsoleWindow();
+                    }
+                    finally
+                    {
+                        FreeConsole();
+                    }
+                }
+                catch
+                {
+                    return IntPtr.Zero;
+                }
+            }
+        }
+
+        private void SaveWindowsGsmConsoleHandle(IntPtr consoleWindow)
+        {
+            try
+            {
+                string cachePath = ServerPath.GetServersCache(_serverData.ServerID);
+                Directory.CreateDirectory(cachePath);
+                File.WriteAllText(Path.Combine(cachePath, "windowsIntPtr"), consoleWindow.ToString());
+            }
+            catch
+            {
+                // The in-memory handle is enough for the current WindowsGSM session.
+            }
+        }
+
+        private async Task SynchronizeNativeConsoleHandle(Process process, ServerConsole serverConsole)
+        {
+            int serverId;
+            if (!int.TryParse(Convert.ToString(_serverData.ServerID), out serverId))
+                return;
+
+            DateTime deadline = DateTime.UtcNow.AddSeconds(15);
+            int stableStartedChecks = 0;
+            bool handleRegistered = false;
+
+            while (DateTime.UtcNow < deadline)
+            {
+                try
+                {
+                    if (process.HasExited)
+                        return;
+                }
+                catch
+                {
+                    return;
+                }
+
+                IntPtr consoleWindow = GetProcessConsoleWindow(process);
+                if (consoleWindow != IntPtr.Zero &&
+                    WindowsGSM.MainWindow._serverMetadata.ContainsKey(serverId))
+                {
+                    try
+                    {
+                        var metadata = WindowsGSM.MainWindow._serverMetadata[serverId];
+                        Process trackedProcess = metadata.Process;
+
+                        if (trackedProcess != null && trackedProcess.Id == process.Id)
+                        {
+                            if (metadata.MainWindow != consoleWindow)
+                            {
+                                metadata.MainWindow = consoleWindow;
+                                SaveWindowsGsmConsoleHandle(consoleWindow);
+                                stableStartedChecks = 0;
+                            }
+                            else if (metadata.ServerStatus == WindowsGSM.MainWindow.ServerStatus.Started)
+                            {
+                                stableStartedChecks++;
+                            }
+
+                            handleRegistered = true;
+
+                            // Waiting for several stable checks after WindowsGSM reports Started
+                            // avoids racing its own initial MainWindowHandle assignment/cache write.
+                            if (stableStartedChecks >= 3)
+                                return;
+                        }
+                    }
+                    catch
+                    {
+                        // WindowsGSM may still be finishing its start bookkeeping. Retry below.
+                    }
+                }
+
+                await Task.Delay(500);
+            }
+
+            if (!handleRegistered)
+            {
+                AddEmbeddedConsoleLine(
+                    serverConsole,
+                    "[WindowsGSM] Native Arma console window could not be registered. Toggle Console may be unavailable for this run.");
+            }
+        }
+
         // - Start server function, return its Process to WindowsGSM
         public async Task<Process> Start()
         {
@@ -585,6 +704,10 @@ namespace WindowsGSM.Plugins
             {
                 p.Start();
 
+#pragma warning disable 4014
+                Task.Run(() => SynchronizeNativeConsoleHandle(p, serverConsole));
+#pragma warning restore 4014
+
                 if (AllowsEmbedConsole)
                 {
                     if (HasStartSwitch(commandLine, "noLogs"))
@@ -624,19 +747,7 @@ namespace WindowsGSM.Plugins
                 if (p.MainWindowHandle != IntPtr.Zero && p.CloseMainWindow())
                     return true;
 
-                if (!AttachConsole((uint)p.Id))
-                    return false;
-
-                IntPtr consoleWindow;
-                try
-                {
-                    consoleWindow = GetConsoleWindow();
-                }
-                finally
-                {
-                    FreeConsole();
-                }
-
+                IntPtr consoleWindow = GetProcessConsoleWindow(p);
                 return consoleWindow != IntPtr.Zero &&
                        PostMessage(consoleWindow, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
             }
