@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
@@ -29,13 +30,20 @@ namespace WindowsGSM.Plugins
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
+        private static readonly ConstructorInfo DataReceivedEventArgsConstructor =
+            typeof(DataReceivedEventArgs).GetConstructor(
+                BindingFlags.Instance | BindingFlags.NonPublic,
+                null,
+                new[] { typeof(string) },
+                null);
+
         // - Plugin Details
         public Plugin Plugin = new Plugin
         {
             name = "WindowsGSM.ARMA3",
             author = "MeFriendos",
             description = "WindowsGSM plugin for Arma 3 Dedicated Server (MeFriendos build)",
-            version = "0.1.0",
+            version = "0.1.1",
             url = "https://github.com/PapaGordon/WindowsGSM.ARMA3-MeFriendos",
             color = "#9eff99"
         };
@@ -129,6 +137,394 @@ namespace WindowsGSM.Plugins
             }
         }
 
+        private static string GetStartParameterValue(string arguments, string parameterName)
+        {
+            if (string.IsNullOrWhiteSpace(arguments) || string.IsNullOrWhiteSpace(parameterName))
+                return null;
+
+            string marker = "-" + parameterName + "=";
+            int index = arguments.LastIndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (index < 0)
+                return null;
+
+            int valueStart = index + marker.Length;
+            if (valueStart >= arguments.Length)
+                return string.Empty;
+
+            bool valueQuoted = arguments[valueStart] == '"';
+            bool wholeArgumentQuoted = index > 0 && arguments[index - 1] == '"';
+
+            if (valueQuoted)
+            {
+                valueStart++;
+                int valueEnd = arguments.IndexOf('"', valueStart);
+                if (valueEnd < 0)
+                    valueEnd = arguments.Length;
+
+                return arguments.Substring(valueStart, valueEnd - valueStart);
+            }
+
+            if (wholeArgumentQuoted)
+            {
+                int valueEnd = arguments.IndexOf('"', valueStart);
+                if (valueEnd < 0)
+                    valueEnd = arguments.Length;
+
+                return arguments.Substring(valueStart, valueEnd - valueStart);
+            }
+
+            int end = valueStart;
+            while (end < arguments.Length && !char.IsWhiteSpace(arguments[end]))
+                end++;
+
+            return arguments.Substring(valueStart, end - valueStart).Trim('"');
+        }
+
+        private static bool HasStartSwitch(string arguments, string switchName)
+        {
+            if (string.IsNullOrWhiteSpace(arguments) || string.IsNullOrWhiteSpace(switchName))
+                return false;
+
+            string marker = "-" + switchName;
+            int searchFrom = 0;
+
+            while (searchFrom < arguments.Length)
+            {
+                int index = arguments.IndexOf(marker, searchFrom, StringComparison.OrdinalIgnoreCase);
+                if (index < 0)
+                    return false;
+
+                int end = index + marker.Length;
+                bool leftBoundary = index == 0 || char.IsWhiteSpace(arguments[index - 1]) || arguments[index - 1] == '"';
+                bool rightBoundary = end >= arguments.Length || char.IsWhiteSpace(arguments[end]) || arguments[end] == '"';
+
+                if (leftBoundary && rightBoundary)
+                    return true;
+
+                searchFrom = index + marker.Length;
+            }
+
+            return false;
+        }
+
+        private string GetRptDirectory(string arguments)
+        {
+            string configuredPath = GetStartParameterValue(arguments, "profiles");
+
+            if (string.IsNullOrWhiteSpace(configuredPath))
+            {
+                return Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "Arma 3");
+            }
+
+            configuredPath = Environment.ExpandEnvironmentVariables(configuredPath.Trim());
+
+            if (Path.IsPathRooted(configuredPath))
+                return Path.GetFullPath(configuredPath);
+
+            return Path.GetFullPath(Path.Combine(
+                ServerPath.GetServersServerFiles(_serverData.ServerID),
+                configuredPath));
+        }
+
+        private static string[] GetRptFiles(string directory)
+        {
+            var files = new List<string>();
+
+            try
+            {
+                if (!Directory.Exists(directory))
+                    return files.ToArray();
+
+                try
+                {
+                    files.AddRange(Directory.GetFiles(directory, "*.rpt", SearchOption.TopDirectoryOnly));
+                }
+                catch
+                {
+                    // Continue with accessible child directories.
+                }
+
+                string[] childDirectories;
+                try
+                {
+                    childDirectories = Directory.GetDirectories(directory);
+                }
+                catch
+                {
+                    childDirectories = new string[0];
+                }
+
+                foreach (string childDirectory in childDirectories)
+                {
+                    try
+                    {
+                        files.AddRange(Directory.GetFiles(childDirectory, "*.rpt", SearchOption.TopDirectoryOnly));
+                    }
+                    catch
+                    {
+                        // Ignore inaccessible profile subdirectories.
+                    }
+                }
+            }
+            catch
+            {
+                // Return whatever was discovered so far.
+            }
+
+            return files.ToArray();
+        }
+
+        private static Dictionary<string, long> SnapshotRptFiles(string directory)
+        {
+            var result = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+
+            try
+            {
+                if (!Directory.Exists(directory))
+                    return result;
+
+                foreach (string file in GetRptFiles(directory))
+                {
+                    try
+                    {
+                        result[file] = new FileInfo(file).Length;
+                    }
+                    catch
+                    {
+                        // Ignore files that disappear while taking the snapshot.
+                    }
+                }
+            }
+            catch
+            {
+                // The server itself must still be allowed to start if log discovery fails.
+            }
+
+            return result;
+        }
+
+        private static bool LooksLikeArmaRpt(string filePath)
+        {
+            string fileName = Path.GetFileName(filePath);
+            return !string.IsNullOrWhiteSpace(fileName) &&
+                   fileName.IndexOf("arma3", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static string FindActiveRptFile(
+            string directory,
+            Dictionary<string, long> snapshot)
+        {
+            try
+            {
+                if (!Directory.Exists(directory))
+                    return null;
+
+                string newestPath = null;
+                DateTime newestWrite = DateTime.MinValue;
+
+                foreach (string file in GetRptFiles(directory))
+                {
+                    if (!LooksLikeArmaRpt(file))
+                        continue;
+
+                    try
+                    {
+                        var info = new FileInfo(file);
+                        long previousLength;
+                        bool existedBefore = snapshot.TryGetValue(file, out previousLength);
+                        bool isNewOrChanged = !existedBefore || info.Length != previousLength;
+
+                        if (!isNewOrChanged)
+                            continue;
+
+                        if (newestPath == null || info.LastWriteTimeUtc > newestWrite)
+                        {
+                            newestPath = file;
+                            newestWrite = info.LastWriteTimeUtc;
+                        }
+                    }
+                    catch
+                    {
+                        // Retry on the next polling pass.
+                    }
+                }
+
+                return newestPath;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private void AddEmbeddedConsoleLine(ServerConsole serverConsole, string line)
+        {
+            if (serverConsole == null || line == null)
+                return;
+
+            try
+            {
+                if (DataReceivedEventArgsConstructor != null)
+                {
+                    var args = (DataReceivedEventArgs)DataReceivedEventArgsConstructor.Invoke(new object[] { line });
+                    serverConsole.AddOutput(null, args);
+                    return;
+                }
+
+                int serverId;
+                if (int.TryParse(Convert.ToString(_serverData.ServerID), out serverId) &&
+                    WindowsGSM.MainWindow._serverMetadata.ContainsKey(serverId))
+                {
+                    WindowsGSM.MainWindow._serverMetadata[serverId].ServerConsole.Add(line);
+                }
+            }
+            catch
+            {
+                // Console mirroring must never interfere with the game server process.
+            }
+        }
+
+        private async Task FollowRptLog(
+            Process process,
+            string rptDirectory,
+            Dictionary<string, long> snapshot,
+            ServerConsole serverConsole)
+        {
+            string rptFile = null;
+            DateTime nextWaitingNotice = DateTime.UtcNow.AddSeconds(15);
+            bool waitingNoticeShown = false;
+
+            AddEmbeddedConsoleLine(serverConsole, "[WindowsGSM] Waiting for Arma 3 RPT output...");
+
+            while (rptFile == null)
+            {
+                rptFile = FindActiveRptFile(rptDirectory, snapshot);
+                if (rptFile != null)
+                    break;
+
+                try
+                {
+                    if (process.HasExited)
+                    {
+                        // One final lookup catches an RPT file written during process shutdown.
+                        rptFile = FindActiveRptFile(rptDirectory, snapshot);
+                        break;
+                    }
+                }
+                catch
+                {
+                    break;
+                }
+
+                if (!waitingNoticeShown && DateTime.UtcNow >= nextWaitingNotice)
+                {
+                    waitingNoticeShown = true;
+                    AddEmbeddedConsoleLine(
+                        serverConsole,
+                        "[WindowsGSM] Still waiting for an RPT file. Check -profiles= and make sure -noLogs is not enabled.");
+                }
+
+                await Task.Delay(250);
+            }
+
+            if (rptFile == null)
+            {
+                AddEmbeddedConsoleLine(serverConsole, "[WindowsGSM] No Arma 3 RPT file became available.");
+                return;
+            }
+
+            long startOffset = 0;
+            long oldLength;
+            if (snapshot.TryGetValue(rptFile, out oldLength))
+                startOffset = oldLength;
+
+            FileStream stream = null;
+
+            while (stream == null)
+            {
+                try
+                {
+                    stream = new FileStream(
+                        rptFile,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.ReadWrite | FileShare.Delete);
+                }
+                catch (IOException)
+                {
+                    try
+                    {
+                        if (process.HasExited)
+                            return;
+                    }
+                    catch
+                    {
+                        return;
+                    }
+
+                    await Task.Delay(200);
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    AddEmbeddedConsoleLine(serverConsole, "[WindowsGSM] RPT file found, but it cannot be read (access denied).");
+                    return;
+                }
+                catch
+                {
+                    return;
+                }
+            }
+
+            using (stream)
+            {
+                if (startOffset > 0 && startOffset <= stream.Length)
+                    stream.Seek(startOffset, SeekOrigin.Begin);
+
+                using (var reader = new StreamReader(stream, Encoding.UTF8, true))
+                {
+                    AddEmbeddedConsoleLine(
+                        serverConsole,
+                        "[WindowsGSM] Reading " + Path.GetFileName(rptFile));
+
+                    while (true)
+                    {
+                        string line = reader.ReadLine();
+                        if (line != null)
+                        {
+                            AddEmbeddedConsoleLine(serverConsole, line);
+                            continue;
+                        }
+
+                        bool exited;
+                        try
+                        {
+                            exited = process.HasExited;
+                        }
+                        catch
+                        {
+                            exited = true;
+                        }
+
+                        if (exited)
+                        {
+                            // Give Arma a short moment to flush the last RPT lines.
+                            await Task.Delay(300);
+                            line = reader.ReadLine();
+                            if (line == null)
+                                break;
+
+                            AddEmbeddedConsoleLine(serverConsole, line);
+                            continue;
+                        }
+
+                        await Task.Delay(150);
+                    }
+                }
+            }
+        }
+
         // - Start server function, return its Process to WindowsGSM
         public async Task<Process> Start()
         {
@@ -150,6 +546,28 @@ namespace WindowsGSM.Plugins
             param.Append(string.IsNullOrWhiteSpace(_serverData.ServerName) ? string.Empty : $" -name=\"{_serverData.ServerName}\"");
             param.Append(string.IsNullOrWhiteSpace(_serverData.ServerParam) ? string.Empty : $" {_serverData.ServerParam}");
 
+            string commandLine = param.ToString();
+            string rptDirectory = null;
+            Dictionary<string, long> rptSnapshot = null;
+            ServerConsole serverConsole = null;
+            bool rptConsoleEnabled = AllowsEmbedConsole && !HasStartSwitch(commandLine, "noLogs");
+
+            if (AllowsEmbedConsole)
+                serverConsole = new ServerConsole(_serverData.ServerID);
+
+            if (rptConsoleEnabled)
+            {
+                try
+                {
+                    rptDirectory = GetRptDirectory(commandLine);
+                    rptSnapshot = SnapshotRptFiles(rptDirectory);
+                }
+                catch
+                {
+                    rptConsoleEnabled = false;
+                }
+            }
+
             var p = new Process
             {
                 StartInfo =
@@ -158,32 +576,35 @@ namespace WindowsGSM.Plugins
                     UseShellExecute = false,
                     WorkingDirectory = ServerPath.GetServersServerFiles(_serverData.ServerID),
                     FileName = exePath,
-                    Arguments = param.ToString()
+                    Arguments = commandLine
                 },
                 EnableRaisingEvents = true
             };
-
-            if (_serverData.EmbedConsole)
-            {
-                // Arma's dedicated-server console is effectively output-only.
-                // Keep the native console available for graceful window close and
-                // redirect only output/error into the WindowsGSM console.
-                p.StartInfo.RedirectStandardOutput = true;
-                p.StartInfo.RedirectStandardError = true;
-
-                var serverConsole = new ServerConsole(_serverData.ServerID);
-                p.OutputDataReceived += serverConsole.AddOutput;
-                p.ErrorDataReceived += serverConsole.AddOutput;
-            }
 
             try
             {
                 p.Start();
 
-                if (_serverData.EmbedConsole)
+                if (AllowsEmbedConsole)
                 {
-                    p.BeginOutputReadLine();
-                    p.BeginErrorReadLine();
+                    if (HasStartSwitch(commandLine, "noLogs"))
+                    {
+                        AddEmbeddedConsoleLine(
+                            serverConsole,
+                            "[WindowsGSM] Embedded console cannot mirror Arma output because -noLogs disables the RPT log.");
+                    }
+                    else if (!rptConsoleEnabled || string.IsNullOrWhiteSpace(rptDirectory))
+                    {
+                        AddEmbeddedConsoleLine(
+                            serverConsole,
+                            "[WindowsGSM] Embedded console could not determine the Arma RPT directory.");
+                    }
+                    else
+                    {
+#pragma warning disable 4014
+                        Task.Run(() => FollowRptLog(p, rptDirectory, rptSnapshot, serverConsole));
+#pragma warning restore 4014
+                    }
                 }
 
                 return p;

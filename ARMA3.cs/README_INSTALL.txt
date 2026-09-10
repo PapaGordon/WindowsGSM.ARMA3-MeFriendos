@@ -1,4 +1,4 @@
-VERSION 0.1.0
+VERSION 0.1.1
 
 WindowsGSM.ARMA3 - MeFriendos build
 ====================================
@@ -14,28 +14,33 @@ Installation
 3. Add "Arma 3 Dedicated Server" in WindowsGSM.
 4. Install/update through SteamCMD with the Steam account requested by WindowsGSM.
 5. Configure server.cfg, profiles, missions and mod startup parameters.
-6. Configure only the required ArmA UDP ports manually in Windows Firewall/router/provider firewall.
+6. Configure only the required Arma UDP ports manually in Windows Firewall/router/provider firewall.
 7. Start the server.
 
 Default parameters
 ------------------
 -profiles=ArmaHosts -config=server.cfg
 
-WindowsGSM Server Name is passed to ArmA as -name for compatibility with the original plugin.
-In ArmA, -name selects the profile name. The public server browser name must be set with hostname= in server.cfg.
+WindowsGSM Server Name is passed to Arma as -name for compatibility with the original plugin.
+In Arma, -name selects the profile name. The public server browser name must be set with hostname= in server.cfg.
 
 Embedded console
 ----------------
 Embedded Console is supported as read-only output.
 
-The plugin redirects ArmA stdout and stderr into WindowsGSM when Embed Console is enabled.
-Standard input is intentionally not redirected because the ArmA dedicated-server console is not treated as a supported local command interface.
+Arma 3 Dedicated Server on Windows does not reliably provide its normal server log through redirected stdout/stderr. Version 0.1.1 therefore leaves the Arma process unredirected and mirrors the active .rpt log into the WindowsGSM console.
 
-Use in-game # admin commands or RCon for administration.
+The plugin resolves -profiles= values with relative, absolute and quoted paths. If -profiles= is not configured, it falls back to %LOCALAPPDATA%\Arma 3. It checks the profile root and direct profile subfolders for the active Arma RPT file.
+
+On a quick restart, the plugin snapshots existing RPT files before launch so it does not deliberately attach to an unchanged log from the previous process.
+
+If -noLogs is enabled, the server can still start but there is no RPT source for the embedded console. WindowsGSM displays a clear message in that case.
+
+Standard input is intentionally not redirected. Use in-game # admin commands or RCon for administration.
 
 Stop behavior
 -------------
-WindowsGSM first asks the native ArmA console window to close and waits up to 20 seconds.
+WindowsGSM first asks the native Arma console window to close and waits up to 20 seconds.
 If the server does not exit, the plugin falls back to terminating the process.
 
 Firewall behavior
@@ -56,7 +61,7 @@ Default incoming ports
 2306/UDP - BattlEye
 
 The ports move together when the base game port changes.
-For multiple ArmA instances, this plugin uses a WindowsGSM PortIncrements value of 100: 2302, 2402, 2502, etc.
+For multiple Arma instances, this plugin uses a WindowsGSM PortIncrements value of 100: 2302, 2402, 2502, etc.
 
 Recommended server.cfg security review
 --------------------------------------
@@ -68,12 +73,18 @@ upnp = 0;
 Do not blindly change allowedFilePatching on a server that uses Headless Clients.
 Use strong private administration passwords and mission/mod-specific BattlEye filters where appropriate.
 
+Validation
+----------
+The v0.1.1 RPT-based embedded console was runtime-tested with WindowsGSM v1.25.1.21 and a running Arma 3 Dedicated Server before release.
+
 Important
 ---------
 - The plugin does not rewrite server.cfg or Arma3Profile files.
 - The plugin does not manage your Altis Life mission or mod list.
 - The plugin does not open game ports automatically.
 - Existing custom startup parameters are passed through unchanged.
+- Embedded Console is read-only.
+- -noLogs disables the RPT source used by Embedded Console.
 - Back up server configuration, profiles and missions before major updates.
 
 Credits
