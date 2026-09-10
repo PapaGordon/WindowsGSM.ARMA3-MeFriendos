@@ -10,18 +10,20 @@
 
 <p align="center">
   <a href="https://github.com/WindowsGSM/WindowsGSM"><img src="https://img.shields.io/badge/WindowsGSM-%E2%89%A51.21-38CDD4" alt="WindowsGSM 1.21+"></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.1.1-9EFF99" alt="Version 0.1.1"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.1.2-9EFF99" alt="Version 0.1.2"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
 </p>
 
-This plugin installs, updates and runs the Arma 3 Dedicated Server through SteamCMD. The MeFriendos build keeps the familiar WindowsGSM workflow while adding 64-bit server startup, a safer firewall policy and a read-only embedded console backed by Arma's RPT log.
+This plugin installs, updates and runs the Arma 3 Dedicated Server through SteamCMD. The MeFriendos build keeps the familiar WindowsGSM workflow while adding 64-bit server startup, a safer firewall policy, a read-only embedded console backed by Arma's RPT log and improved native **Toggle Console** handling.
 
 ## Features
 
 - Installs and updates the official Arma 3 Dedicated Server through SteamCMD.
 - Starts `arma3server_x64.exe` instead of the legacy 32-bit executable.
 - Mirrors the active Arma 3 `.rpt` log into the WindowsGSM embedded console.
-- Keeps the native Arma process unredirected so its console/window remains available to WindowsGSM.
+- Keeps the native Arma process unredirected so WindowsGSM's **Toggle Console** feature remains available.
+- Resolves and synchronizes the native Arma console window handle with WindowsGSM after startup.
+- Persists the resolved native window handle in the WindowsGSM server cache for the running instance.
 - Tries a normal console-window close before using process termination when stopping the server.
 - Removes WindowsGSM's automatic application-wide firewall exception before the server starts listening.
 - Leaves targeted manual firewall rules unchanged.
@@ -32,6 +34,7 @@ This plugin installs, updates and runs the Arma 3 Dedicated Server through Steam
 
 | Setting | Value |
 | --- | --- |
+| Plugin version | `0.1.2` |
 | SteamCMD App ID | `233780` |
 | Start executable | `arma3server_x64.exe` |
 | Default game port | `2302/UDP` |
@@ -41,6 +44,7 @@ This plugin installs, updates and runs the Arma 3 Dedicated Server through Steam
 | Default parameters | `-profiles=ArmaHosts -config=server.cfg` |
 | Firewall ports | Manual configuration only |
 | Embedded console | Read-only RPT mirror |
+| Toggle Console | Native Arma console window |
 
 ## Requirements
 
@@ -71,9 +75,16 @@ The Arma 3 Dedicated Server package uses Steam App ID `233780`. A dedicated Stea
 
 SteamCMD updates the dedicated-server files. The plugin does not intentionally rewrite your mission, Altis Life configuration, mod list, `server.cfg` or profile files.
 
-## Embedded console
+## Console behavior
 
-Arma 3 Dedicated Server on Windows does not provide dependable server output through redirected `stdout` / `stderr`. Version `0.1.1` therefore leaves the Arma process unredirected and follows the active `.rpt` log instead.
+WindowsGSM exposes two different console-related features for this plugin. They are intentionally separate:
+
+- **Embed Console** shows read-only Arma server output inside WindowsGSM by following the active `.rpt` file.
+- **Toggle Console** shows or hides the native Windows console window belonging to `arma3server_x64.exe`.
+
+### Embedded console
+
+Arma 3 Dedicated Server on Windows does not provide dependable server output through redirected `stdout` / `stderr`. Since version `0.1.1`, this plugin therefore leaves the Arma process unredirected and follows the active `.rpt` log instead.
 
 When **Embed Console** is enabled, the plugin:
 
@@ -90,6 +101,23 @@ This is intentionally **read-only**. Typing commands into the WindowsGSM console
 
 The `0.1.1` RPT-based console path was runtime-tested with WindowsGSM `v1.25.1.21` and an Arma 3 Dedicated Server before release.
 
+### Native Toggle Console
+
+Version `0.1.2` addresses cases where WindowsGSM's **Toggle Console** button does nothing even though the Arma server is running normally.
+
+WindowsGSM toggles the native console by using the window handle stored in its server metadata. Arma's native console window can become available or change after the process is first created, so an early cached handle can be missing or stale.
+
+The plugin now:
+
+- keeps `RedirectStandardOutput` disabled so WindowsGSM does not intentionally disable Toggle Console;
+- resolves the native console window associated with the running Arma process;
+- waits for WindowsGSM to register the actual server process;
+- synchronizes the resolved window handle into WindowsGSM's in-memory server metadata;
+- repeats the synchronization through the final startup state to avoid racing WindowsGSM's own initial handle assignment;
+- stores the resolved handle in the server's `windowsIntPtr` cache file.
+
+The native console-handle change in `0.1.2` has been source-reviewed against the current WindowsGSM console-toggle and server-metadata flow. A real Windows/Arma runtime test is still recommended before treating the release as fully runtime-verified.
+
 ## Profiles and server name
 
 For compatibility with the original plugin, the WindowsGSM **Server Name** is passed as Arma's `-name` parameter. In Arma, `-name` selects the **profile name**; it is not the public browser hostname.
@@ -102,7 +130,7 @@ hostname = "MeFriendos Altis Life";
 
 The default `-profiles=ArmaHosts` parameter keeps profile/log data below the server installation. You can replace it with another relative or absolute path in WindowsGSM's additional parameters when required.
 
-If you use `-noLogs`, Arma does not create the RPT source required for the embedded console mirror. The game server itself can still start, but WindowsGSM will not have RPT output to display.
+If you use `-noLogs`, Arma does not create the RPT source required for the embedded console mirror. The game server itself can still start, but WindowsGSM will not have RPT output to display. This does not by itself disable the native **Toggle Console** window.
 
 ## Security: automatic port opening is disabled
 
@@ -141,9 +169,9 @@ upnp = 0;
 
 ## Stop behavior
 
-The stop action first asks the native Arma console/window to close normally and waits up to 20 seconds for the process to exit. If that does not work, it falls back to terminating the process, preserving the original plugin's last-resort behavior.
+The stop action first tries the normal process window close path. If the process does not expose a usable `MainWindowHandle`, the plugin resolves the associated native console window and posts `WM_CLOSE` to it. It then waits up to 20 seconds for Arma to exit before falling back to process termination.
 
-Because the RPT mirror does not redirect Arma's standard streams, the native process/window remains available for this behavior and for WindowsGSM's normal **Toggle Console** handling.
+Because the RPT mirror does not redirect Arma's standard streams, the native process/window remains available for both graceful stop handling and WindowsGSM's **Toggle Console** feature.
 
 ## Mods and Altis Life
 
@@ -158,6 +186,12 @@ The plugin does not scan, download, reorder or modify Arma mods. This is intenti
 For very long mod command lines, Arma also supports startup parameter files through `-par=`.
 
 ## Troubleshooting
+
+### Toggle Console does nothing
+
+Make sure WindowsGSM loaded plugin version `0.1.2` or newer and restart the Arma server after updating the plugin. The native console handle is resolved and synchronized during server startup; updating the plugin while an already-running server remains attached to an older plugin instance cannot repair that run retroactively.
+
+If the embedded RPT console works but **Toggle Console** still does not, these are separate features. `-noLogs` only affects the RPT-based embedded console and is not the expected cause of a missing native console window.
 
 ### The server does not start and reports a firewall error
 
@@ -189,24 +223,30 @@ Check `-profiles=` and `-name=` in the effective startup parameters. Arma writes
 
 ## Testing checklist
 
-Before `0.1.1` was published, the plugin source and documentation were rechecked against the WindowsGSM plugin flow and the RPT console path was tested on a running server. The release checklist covers:
+The `0.1.2` source and documentation were rechecked against the WindowsGSM plugin, server-metadata and Toggle Console flow. The release checklist covers:
 
-- WindowsGSM loads `ARMA3.cs` without a plugin compilation error.
+- WindowsGSM can load `ARMA3.cs` without relying on redirected standard output.
 - Install and Update remain handled through SteamCMD App ID `233780`.
 - The plugin starts `arma3server_x64.exe` with the configured game port and additional parameters.
-- Embedded Console uses WindowsGSM's runtime `AllowsEmbedConsole` flag.
-- Embedded Console mirrors the active Arma `.rpt` instead of relying on Windows `stdout` / `stderr` redirection.
+- `RedirectStandardOutput` remains disabled so WindowsGSM does not intentionally ignore Toggle Console.
+- The native Arma console handle is resolved after process startup.
+- The handle is written to the matching WindowsGSM `ServerMetadata.MainWindow` only after WindowsGSM tracks the same process ID.
+- Handle synchronization continues through the final Started state to reduce startup races.
+- The resolved handle is persisted to the server `windowsIntPtr` cache.
+- Embedded Console continues to use the RPT mirror introduced in `0.1.1`.
 - Relative, absolute and quoted `-profiles=` values are resolved.
 - `-noLogs` is detected and reported without blocking server startup.
 - A quick restart does not deliberately attach to an unchanged RPT from the previous run.
 - The RPT follower ends with the Arma process.
 - The server still starts normally when Embedded Console is disabled.
-- Stop requests a normal window close before falling back to process termination.
+- Stop requests a normal window/console close before falling back to process termination.
 - No WindowsGSM application-wide firewall exception remains for this server's `arma3server_x64.exe` after successful startup.
 - Port-specific manual firewall rules remain unchanged.
 - A firewall-cleanup verification failure prevents the server process from starting.
 - Default multi-instance allocation uses `2302`, `2402`, `2502`, etc.
 - Existing profile, Altis Life and mod startup parameters continue to pass through unchanged.
+
+The existing `0.1.1` RPT implementation was runtime-tested with WindowsGSM `v1.25.1.21`. The new `0.1.2` native Toggle Console repair still requires final runtime confirmation on Windows before release sign-off.
 
 ## Project links
 
