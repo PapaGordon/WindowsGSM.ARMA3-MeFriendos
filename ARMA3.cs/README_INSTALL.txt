@@ -1,4 +1,4 @@
-VERSION 0.1.1
+VERSION 0.1.2
 
 WindowsGSM.ARMA3 - MeFriendos build
 ====================================
@@ -24,11 +24,19 @@ Default parameters
 WindowsGSM Server Name is passed to Arma as -name for compatibility with the original plugin.
 In Arma, -name selects the profile name. The public server browser name must be set with hostname= in server.cfg.
 
-Embedded console
+Console behavior
 ----------------
-Embedded Console is supported as read-only output.
+WindowsGSM has two separate console features for this plugin:
 
-Arma 3 Dedicated Server on Windows does not reliably provide its normal server log through redirected stdout/stderr. Version 0.1.1 therefore leaves the Arma process unredirected and mirrors the active .rpt log into the WindowsGSM console.
+1. Embed Console
+   Read-only Arma output mirrored from the active .rpt file into WindowsGSM.
+
+2. Toggle Console
+   Shows or hides the native Windows console window of arma3server_x64.exe.
+
+Embedded Console
+----------------
+Arma 3 Dedicated Server on Windows does not reliably provide its normal server log through redirected stdout/stderr. Since version 0.1.1, the plugin leaves the Arma process unredirected and mirrors the active .rpt log into the WindowsGSM console.
 
 The plugin resolves -profiles= values with relative, absolute and quoted paths. If -profiles= is not configured, it falls back to %LOCALAPPDATA%\Arma 3. It checks the profile root and direct profile subfolders for the active Arma RPT file.
 
@@ -38,10 +46,23 @@ If -noLogs is enabled, the server can still start but there is no RPT source for
 
 Standard input is intentionally not redirected. Use in-game # admin commands or RCon for administration.
 
+Toggle Console fix in 0.1.2
+---------------------------
+Version 0.1.2 fixes cases where WindowsGSM's Toggle Console button does nothing while the Arma server itself is running normally.
+
+The plugin now resolves the native console window after startup and synchronizes its window handle with WindowsGSM's server metadata after WindowsGSM has registered the actual Arma process. The handle is also written to the server's windowsIntPtr cache.
+
+This avoids relying only on an early Process.MainWindowHandle value that can be missing or stale while Arma is still creating its native console window.
+
+RedirectStandardOutput remains disabled. This is required because WindowsGSM intentionally ignores Toggle Console for processes whose standard output is redirected.
+
+After updating to 0.1.2, restart the Arma server so the native console handle can be detected and registered for the new process.
+
 Stop behavior
 -------------
-WindowsGSM first asks the native Arma console window to close and waits up to 20 seconds.
-If the server does not exit, the plugin falls back to terminating the process.
+WindowsGSM first tries the normal process window close path.
+If no usable Process.MainWindowHandle is available, the plugin resolves the native Arma console window and posts a normal WM_CLOSE request to it.
+It waits up to 20 seconds before falling back to terminating the process.
 
 Firewall behavior
 -----------------
@@ -77,6 +98,8 @@ Validation
 ----------
 The v0.1.1 RPT-based embedded console was runtime-tested with WindowsGSM v1.25.1.21 and a running Arma 3 Dedicated Server before release.
 
+The v0.1.2 Toggle Console repair has been source-reviewed against WindowsGSM's current Toggle Console, server metadata and cache flow. Final real-world validation still requires starting an Arma server on Windows and confirming that Toggle Console shows and hides the native window correctly.
+
 Important
 ---------
 - The plugin does not rewrite server.cfg or Arma3Profile files.
@@ -84,7 +107,8 @@ Important
 - The plugin does not open game ports automatically.
 - Existing custom startup parameters are passed through unchanged.
 - Embedded Console is read-only.
-- -noLogs disables the RPT source used by Embedded Console.
+- Toggle Console controls the native Arma console window and is separate from Embedded Console.
+- -noLogs disables the RPT source used by Embedded Console, not the native Toggle Console window.
 - Back up server configuration, profiles and missions before major updates.
 
 Credits
