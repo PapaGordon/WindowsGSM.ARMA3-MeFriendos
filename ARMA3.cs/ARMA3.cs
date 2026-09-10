@@ -17,7 +17,8 @@ namespace WindowsGSM.Plugins
     public class ARMA3 : SteamCMDAgent
     {
         private const uint WM_CLOSE = 0x0010;
-        private const uint GA_ROOTOWNER = 3;
+        private const int SW_HIDE = 0;
+        private const int SW_SHOWNORMAL = 1;
         private static readonly object ConsoleAttachLock = new object();
 
         private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
@@ -45,11 +46,15 @@ namespace WindowsGSM.Plugins
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool IsWindow(IntPtr hWnd);
 
-        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
 
         [DllImport("user32.dll", SetLastError = true)]
-        private static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
 
         private static readonly ConstructorInfo DataReceivedEventArgsConstructor =
             typeof(DataReceivedEventArgs).GetConstructor(
@@ -702,30 +707,57 @@ namespace WindowsGSM.Plugins
             if (consoleWindow == IntPtr.Zero)
                 return IntPtr.Zero;
 
-            // Windows Terminal / ConPTY can expose a PseudoConsoleWindow that is not the visible
-            // terminal itself. Prefer its root owner if Windows provides one.
-            if (string.Equals(consoleClass, "PseudoConsoleWindow", StringComparison.OrdinalIgnoreCase))
-            {
-                try
-                {
-                    IntPtr rootOwner = GetAncestor(consoleWindow, GA_ROOTOWNER);
-                    if (rootOwner != IntPtr.Zero && rootOwner != consoleWindow && IsWindow(rootOwner))
-                    {
-                        source = "AttachConsole PseudoConsole root owner";
-                        windowClass = GetWindowClassName(rootOwner);
-                        return rootOwner;
-                    }
-                }
-                catch
-                {
-                    // Fall back to the PseudoConsoleWindow handle below. Some terminal versions
-                    // proxy ShowWindow calls through this window even though it is not rendered.
-                }
-            }
-
             source = "AttachConsole/GetConsoleWindow";
             windowClass = consoleClass;
             return consoleWindow;
+        }
+
+        private static bool IsSafeToggleTarget(IntPtr hWnd, string windowClass)
+        {
+            if (hWnd == IntPtr.Zero || !IsWindow(hWnd))
+                return false;
+
+            // A PseudoConsoleWindow is not necessarily the visible terminal window. Registering or
+            // hiding a terminal host can affect unrelated sessions, so do not treat it as a native
+            // Toggle Console target.
+            return !string.Equals(windowClass, "PseudoConsoleWindow", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool TryGetShowConsoleState(object metadata, out bool showConsole)
+        {
+            showConsole = false;
+            if (metadata == null)
+                return false;
+
+            try
+            {
+                Type metadataType = metadata.GetType();
+                FieldInfo field = metadataType.GetField(
+                    "ShowConsole",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+                if (field != null && field.FieldType == typeof(bool))
+                {
+                    showConsole = (bool)field.GetValue(metadata);
+                    return true;
+                }
+
+                PropertyInfo property = metadataType.GetProperty(
+                    "ShowConsole",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+                if (property != null && property.PropertyType == typeof(bool) && property.CanRead)
+                {
+                    showConsole = (bool)property.GetValue(metadata, null);
+                    return true;
+                }
+            }
+            catch
+            {
+                // Upstream WindowsGSM versions may not expose ShowConsole. Handle sync still works.
+            }
+
+            return false;
         }
 
         private string GetToggleConsoleDiagnosticPath()
@@ -744,7 +776,8 @@ namespace WindowsGSM.Plugins
                 File.WriteAllText(
                     path,
                     DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") +
-                    " [0.1.2] Toggle Console monitor started for PID " + process.Id + Environment.NewLine);
+                    " [0.1.2] Toggle Console monitor started for PID " + process.Id +
+                    "; WindowsGSM " + WindowsGSM.MainWindow.WGSM_VERSION + Environment.NewLine);
             }
             catch
             {
@@ -790,11 +823,16 @@ namespace WindowsGSM.Plugins
 
             ResetToggleConsoleDiagnostic(process);
 
-            IntPtr lastResolvedWindow = IntPtr.Zero;
-            string lastSource = string.Empty;
-            string lastClass = string.Empty;
+            IntPtr resolvedWindow = IntPtr.Zero;
+            string resolvedSource = string.Empty;
+            string resolvedClass = string.Empty;
+            int lastAttachError = 0;
+            DateTime nextResolveAt = DateTime.MinValue;
             DateTime unresolvedNoticeAt = DateTime.UtcNow.AddSeconds(15);
             bool unresolvedNoticeShown = false;
+            bool showConsoleCapabilityLogged = false;
+            bool showConsoleUnavailableLogged = false;
+            bool? lastAppliedShowConsole = null;
 
             while (true)
             {
@@ -812,18 +850,50 @@ namespace WindowsGSM.Plugins
                     return;
                 }
 
-                string source;
-                string windowClass;
-                int attachError;
-                IntPtr resolvedWindow = ResolveToggleWindow(process, out source, out windowClass, out attachError);
-
-                if (resolvedWindow == IntPtr.Zero &&
-                    lastResolvedWindow != IntPtr.Zero &&
-                    IsWindow(lastResolvedWindow))
+                if (resolvedWindow == IntPtr.Zero ||
+                    !IsWindow(resolvedWindow) ||
+                    DateTime.UtcNow >= nextResolveAt)
                 {
-                    resolvedWindow = lastResolvedWindow;
-                    source = lastSource + " (previous handle still valid)";
-                    windowClass = lastClass;
+                    string source;
+                    string windowClass;
+                    int attachError;
+                    IntPtr candidate = ResolveToggleWindow(process, out source, out windowClass, out attachError);
+                    lastAttachError = attachError;
+                    nextResolveAt = DateTime.UtcNow.AddSeconds(5);
+
+                    if (candidate != IntPtr.Zero && !IsSafeToggleTarget(candidate, windowClass))
+                    {
+                        WriteToggleConsoleDiagnostic(
+                            "Rejected HWND 0x" + candidate.ToInt64().ToString("X") +
+                            " via " + source + " [" + windowClass + "] because it is not a safe native toggle target.");
+                        candidate = IntPtr.Zero;
+                    }
+
+                    if (candidate != IntPtr.Zero)
+                    {
+                        if (resolvedWindow != candidate)
+                        {
+                            WriteToggleConsoleDiagnostic(
+                                "Resolved HWND 0x" + candidate.ToInt64().ToString("X") +
+                                " via " + source +
+                                (string.IsNullOrWhiteSpace(windowClass) ? string.Empty : " [" + windowClass + "]") + ".");
+                            lastAppliedShowConsole = null;
+                        }
+
+                        resolvedWindow = candidate;
+                        resolvedSource = source;
+                        resolvedClass = windowClass;
+                        unresolvedNoticeShown = false;
+                        unresolvedNoticeAt = DateTime.UtcNow.AddSeconds(15);
+                    }
+                    else if (resolvedWindow != IntPtr.Zero && !IsWindow(resolvedWindow))
+                    {
+                        WriteToggleConsoleDiagnostic("Previously resolved Toggle Console HWND became invalid.");
+                        resolvedWindow = IntPtr.Zero;
+                        resolvedSource = string.Empty;
+                        resolvedClass = string.Empty;
+                        lastAppliedShowConsole = null;
+                    }
                 }
 
                 bool matchingProcessRegistered = false;
@@ -835,7 +905,7 @@ namespace WindowsGSM.Plugins
                         Process trackedProcess = metadata.Process;
                         matchingProcessRegistered = trackedProcess != null && trackedProcess.Id == process.Id;
 
-                        if (matchingProcessRegistered && resolvedWindow != IntPtr.Zero)
+                        if (matchingProcessRegistered && resolvedWindow != IntPtr.Zero && IsWindow(resolvedWindow))
                         {
                             if (metadata.MainWindow != resolvedWindow)
                             {
@@ -847,24 +917,45 @@ namespace WindowsGSM.Plugins
                                     "WindowsGSM MainWindow updated from 0x" +
                                     previousWindow.ToInt64().ToString("X") + " to 0x" +
                                     resolvedWindow.ToInt64().ToString("X") +
-                                    " via " + source +
-                                    (string.IsNullOrWhiteSpace(windowClass) ? string.Empty : " [" + windowClass + "]") + ".");
-                            }
+                                    " via " + resolvedSource +
+                                    (string.IsNullOrWhiteSpace(resolvedClass) ? string.Empty : " [" + resolvedClass + "]") + ".");
 
-                            if (lastResolvedWindow != resolvedWindow)
-                            {
                                 AddEmbeddedConsoleLine(
                                     serverConsole,
-                                    "[WindowsGSM] Toggle Console window registered via " + source +
+                                    "[WindowsGSM] Toggle Console window registered via " + resolvedSource +
                                     " (HWND 0x" + resolvedWindow.ToInt64().ToString("X") +
-                                    (string.IsNullOrWhiteSpace(windowClass) ? string.Empty : ", " + windowClass) + ").");
+                                    (string.IsNullOrWhiteSpace(resolvedClass) ? string.Empty : ", " + resolvedClass) + ").");
                             }
 
-                            lastResolvedWindow = resolvedWindow;
-                            lastSource = source;
-                            lastClass = windowClass;
-                            unresolvedNoticeShown = false;
-                            unresolvedNoticeAt = DateTime.UtcNow.AddSeconds(15);
+                            bool desiredShowConsole;
+                            if (TryGetShowConsoleState(metadata, out desiredShowConsole))
+                            {
+                                if (!showConsoleCapabilityLogged)
+                                {
+                                    WriteToggleConsoleDiagnostic(
+                                        "Detected WindowsGSM ShowConsole state support; direct visibility synchronization enabled.");
+                                    showConsoleCapabilityLogged = true;
+                                }
+
+                                bool currentlyVisible = IsWindowVisible(resolvedWindow);
+                                if (currentlyVisible != desiredShowConsole ||
+                                    !lastAppliedShowConsole.HasValue ||
+                                    lastAppliedShowConsole.Value != desiredShowConsole)
+                                {
+                                    ShowWindow(resolvedWindow, desiredShowConsole ? SW_SHOWNORMAL : SW_HIDE);
+                                    lastAppliedShowConsole = desiredShowConsole;
+
+                                    WriteToggleConsoleDiagnostic(
+                                        "Applied ShowConsole=" + desiredShowConsole +
+                                        " directly to HWND 0x" + resolvedWindow.ToInt64().ToString("X") + ".");
+                                }
+                            }
+                            else if (!showConsoleUnavailableLogged)
+                            {
+                                WriteToggleConsoleDiagnostic(
+                                    "WindowsGSM does not expose ShowConsole; using handle synchronization only.");
+                                showConsoleUnavailableLogged = true;
+                            }
                         }
                     }
                     catch
@@ -877,9 +968,9 @@ namespace WindowsGSM.Plugins
                     DateTime.UtcNow >= unresolvedNoticeAt &&
                     !unresolvedNoticeShown)
                 {
-                    string detail = attachError == 0
+                    string detail = lastAttachError == 0
                         ? "No usable native window was found."
-                        : "AttachConsole failed with Win32 error " + attachError + ".";
+                        : "AttachConsole failed with Win32 error " + lastAttachError + ".";
 
                     WriteToggleConsoleDiagnostic(
                         detail + " WindowsGSM process registered=" + matchingProcessRegistered + ".");
@@ -889,7 +980,7 @@ namespace WindowsGSM.Plugins
                     unresolvedNoticeShown = true;
                 }
 
-                await Task.Delay(resolvedWindow == IntPtr.Zero ? 1000 : 5000);
+                await Task.Delay(250);
             }
         }
 
