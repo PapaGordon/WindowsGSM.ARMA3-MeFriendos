@@ -13,13 +13,14 @@
 - Rejects `PseudoConsoleWindow` as a native Toggle Console target because it may not represent a safe independently visible window.
 - Continuously monitors the resolved native window for the lifetime of the Arma process instead of stopping after a short startup window.
 - Synchronizes a valid resolved HWND into the matching WindowsGSM `ServerMetadata.MainWindow` and persists it to the server's `windowsIntPtr` cache.
-- Detects Raziel's `ShowConsole` state through reflection and directly applies the requested show/hide state to the resolved native Arma window. This lets the plugin follow the Toggle Console button even when WindowsGSM temporarily holds a stale HWND.
+- Detects Raziel's `ShowConsole` state through reflection and directly applies the requested show/hide state to the resolved native Arma window.
 - Uses reflection for `ShowConsole` so the source does not hard-depend on the Raziel-only field at compile time; on WindowsGSM builds without it, normal handle synchronization remains available.
 - Adds `arma3-toggle-console.log` in the WindowsGSM server cache folder. It records the Arma PID, WindowsGSM version, discovery path, HWND changes, ShowConsole synchronization and AttachConsole errors.
 - Keeps the read-only RPT-based Embedded Console implementation introduced in `0.1.1` unchanged.
 - Keeps graceful-stop handling conservative: a normal process-window close is attempted first; a classic console window may receive `WM_CLOSE`; pseudo-terminal windows are not deliberately closed by the plugin.
-- Updated README and installation documentation to distinguish the released `0.1.1` build from the unreleased `0.1.2` development build and to document the `Raziel7893/WindowsGSM v1.25.1.22` behavior.
-- Source-reviewed the implementation against the exact `v1.25.1.22` Toggle Console, `ShowConsole`, server-metadata and cache flow. Final Windows/Arma runtime confirmation is still required before `0.1.2` release sign-off.
+- Updated README and installation documentation to distinguish the released `0.1.1` build from the unreleased `0.1.2` development build and to document `Raziel7893/WindowsGSM v1.25.1.22` behavior.
+- Source-reviewed the implementation against the exact `v1.25.1.22` Toggle Console, `ShowConsole`, server-metadata and cache flow.
+- **Runtime validation passed on 2026-09-10 with Raziel7893/WindowsGSM v1.25.1.22 and a real Arma 3 Dedicated Server. Toggle Console successfully shows and hides the native console and normal server operation remains intact.**
 
 ## 0.1.1 — 2026-09-10
 
