@@ -2,20 +2,24 @@
 
 ## 0.1.2 — Unreleased
 
-- Keeps `0.1.2` as the active development version because the previous Toggle Console attempt was not released.
+- Keeps `0.1.2` as the active development version because no `0.1.2` GitHub release has been published yet.
 - Reworked native **Toggle Console** handling after runtime testing showed that the first `0.1.2` startup-only handle synchronization was not sufficient.
+- Targets the actual MeFriendos WindowsGSM environment: `Raziel7893/WindowsGSM v1.25.1.22`.
+- Corrected the earlier upstream assumption about `RedirectStandardOutput`: Raziel's `v1.25.1.22` Toggle Console implementation has that guard commented out and instead persists a `ShowConsole` state.
 - Refreshes the Arma `Process` object before reading `MainWindowHandle` so a cached early window handle is not trusted indefinitely.
 - Adds explicit top-level window discovery with `EnumWindows` / `GetWindowThreadProcessId` for windows owned by the running Arma process.
+- Avoids selecting arbitrary hidden helper windows during the EnumWindows fallback; `ConsoleWindowClass` is preferred, otherwise only a visible process-owned window is accepted before falling through to console discovery.
 - Keeps `AttachConsole` / `GetConsoleWindow` as an additional console-specific fallback instead of using it as the only repair path.
-- Detects `PseudoConsoleWindow` and attempts to resolve its root owner for Windows Terminal / ConPTY-style hosting.
+- Rejects `PseudoConsoleWindow` as a native Toggle Console target because it may not represent a safe independently visible window.
 - Continuously monitors the resolved native window for the lifetime of the Arma process instead of stopping after a short startup window.
 - Synchronizes a valid resolved HWND into the matching WindowsGSM `ServerMetadata.MainWindow` and persists it to the server's `windowsIntPtr` cache.
-- Adds `arma3-toggle-console.log` in the WindowsGSM server cache folder so failed runtime detection can be diagnosed from the exact discovery path and Win32 error.
-- Keeps `RedirectStandardOutput` disabled because WindowsGSM intentionally bypasses its native Toggle Console action when standard output is redirected.
+- Detects Raziel's `ShowConsole` state through reflection and directly applies the requested show/hide state to the resolved native Arma window. This lets the plugin follow the Toggle Console button even when WindowsGSM temporarily holds a stale HWND.
+- Uses reflection for `ShowConsole` so the source does not hard-depend on the Raziel-only field at compile time; on WindowsGSM builds without it, normal handle synchronization remains available.
+- Adds `arma3-toggle-console.log` in the WindowsGSM server cache folder. It records the Arma PID, WindowsGSM version, discovery path, HWND changes, ShowConsole synchronization and AttachConsole errors.
 - Keeps the read-only RPT-based Embedded Console implementation introduced in `0.1.1` unchanged.
-- Keeps graceful-stop handling conservative: a normal process-window close is attempted first; a classic console window may receive `WM_CLOSE`; pseudo-terminal windows are not closed by the plugin.
-- Updated README and installation documentation to distinguish the released `0.1.1` build from the unreleased `0.1.2` development build and to describe the new diagnostics.
-- Source-reviewed the implementation against WindowsGSM's current Toggle Console, server-metadata and cache flow and against the relevant Win32/.NET window-handle APIs. Final Windows/Arma runtime confirmation is still required before `0.1.2` release sign-off.
+- Keeps graceful-stop handling conservative: a normal process-window close is attempted first; a classic console window may receive `WM_CLOSE`; pseudo-terminal windows are not deliberately closed by the plugin.
+- Updated README and installation documentation to distinguish the released `0.1.1` build from the unreleased `0.1.2` development build and to document the `Raziel7893/WindowsGSM v1.25.1.22` behavior.
+- Source-reviewed the implementation against the exact `v1.25.1.22` Toggle Console, `ShowConsole`, server-metadata and cache flow. Final Windows/Arma runtime confirmation is still required before `0.1.2` release sign-off.
 
 ## 0.1.1 — 2026-09-10
 
