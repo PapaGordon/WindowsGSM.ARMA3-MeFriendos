@@ -17,7 +17,10 @@ namespace WindowsGSM.Plugins
     public class ARMA3 : SteamCMDAgent
     {
         private const uint WM_CLOSE = 0x0010;
+        private const uint GA_ROOTOWNER = 3;
         private static readonly object ConsoleAttachLock = new object();
+
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool AttachConsole(uint dwProcessId);
@@ -30,6 +33,23 @@ namespace WindowsGSM.Plugins
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
 
         private static readonly ConstructorInfo DataReceivedEventArgsConstructor =
             typeof(DataReceivedEventArgs).GetConstructor(
@@ -526,8 +546,77 @@ namespace WindowsGSM.Plugins
             }
         }
 
-        private static IntPtr GetProcessConsoleWindow(Process process)
+        private static string GetWindowClassName(IntPtr hWnd)
         {
+            if (hWnd == IntPtr.Zero || !IsWindow(hWnd))
+                return string.Empty;
+
+            try
+            {
+                var className = new StringBuilder(256);
+                int length = GetClassName(hWnd, className, className.Capacity);
+                return length > 0 ? className.ToString() : string.Empty;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private static IntPtr FindTopLevelWindowForProcess(Process process)
+        {
+            if (process == null)
+                return IntPtr.Zero;
+
+            int processId;
+            try
+            {
+                processId = process.Id;
+            }
+            catch
+            {
+                return IntPtr.Zero;
+            }
+
+            IntPtr firstWindow = IntPtr.Zero;
+            IntPtr preferredWindow = IntPtr.Zero;
+
+            try
+            {
+                EnumWindows(delegate (IntPtr hWnd, IntPtr lParam)
+                {
+                    uint windowProcessId;
+                    GetWindowThreadProcessId(hWnd, out windowProcessId);
+
+                    if (windowProcessId != (uint)processId || !IsWindow(hWnd))
+                        return true;
+
+                    if (firstWindow == IntPtr.Zero)
+                        firstWindow = hWnd;
+
+                    string className = GetWindowClassName(hWnd);
+                    if (string.Equals(className, "ConsoleWindowClass", StringComparison.OrdinalIgnoreCase))
+                    {
+                        preferredWindow = hWnd;
+                        return false;
+                    }
+
+                    return true;
+                }, IntPtr.Zero);
+            }
+            catch
+            {
+                return IntPtr.Zero;
+            }
+
+            return preferredWindow != IntPtr.Zero ? preferredWindow : firstWindow;
+        }
+
+        private static IntPtr GetAttachedConsoleWindow(Process process, out string windowClass, out int attachError)
+        {
+            windowClass = string.Empty;
+            attachError = 0;
+
             if (process == null)
                 return IntPtr.Zero;
 
@@ -538,16 +627,25 @@ namespace WindowsGSM.Plugins
                     if (process.HasExited)
                         return IntPtr.Zero;
 
-                    // Do not detach WindowsGSM from a console it already owns.
+                    // Console attachment is process-wide. Never detach a console that WindowsGSM
+                    // was already attached to before this probe.
                     if (GetConsoleWindow() != IntPtr.Zero)
                         return IntPtr.Zero;
 
                     if (!AttachConsole((uint)process.Id))
+                    {
+                        attachError = Marshal.GetLastWin32Error();
                         return IntPtr.Zero;
+                    }
 
                     try
                     {
-                        return GetConsoleWindow();
+                        IntPtr consoleWindow = GetConsoleWindow();
+                        if (consoleWindow == IntPtr.Zero || !IsWindow(consoleWindow))
+                            return IntPtr.Zero;
+
+                        windowClass = GetWindowClassName(consoleWindow);
+                        return consoleWindow;
                     }
                     finally
                     {
@@ -556,8 +654,117 @@ namespace WindowsGSM.Plugins
                 }
                 catch
                 {
+                    attachError = Marshal.GetLastWin32Error();
                     return IntPtr.Zero;
                 }
+            }
+        }
+
+        private static IntPtr ResolveToggleWindow(
+            Process process,
+            out string source,
+            out string windowClass,
+            out int attachError)
+        {
+            source = string.Empty;
+            windowClass = string.Empty;
+            attachError = 0;
+
+            if (process == null)
+                return IntPtr.Zero;
+
+            try
+            {
+                process.Refresh();
+                IntPtr mainWindow = process.MainWindowHandle;
+                if (mainWindow != IntPtr.Zero && IsWindow(mainWindow))
+                {
+                    source = "Process.MainWindowHandle after Refresh";
+                    windowClass = GetWindowClassName(mainWindow);
+                    return mainWindow;
+                }
+            }
+            catch
+            {
+                // Continue with explicit window discovery.
+            }
+
+            IntPtr processWindow = FindTopLevelWindowForProcess(process);
+            if (processWindow != IntPtr.Zero && IsWindow(processWindow))
+            {
+                source = "EnumWindows by Arma PID";
+                windowClass = GetWindowClassName(processWindow);
+                return processWindow;
+            }
+
+            string consoleClass;
+            IntPtr consoleWindow = GetAttachedConsoleWindow(process, out consoleClass, out attachError);
+            if (consoleWindow == IntPtr.Zero)
+                return IntPtr.Zero;
+
+            // Windows Terminal / ConPTY can expose a PseudoConsoleWindow that is not the visible
+            // terminal itself. Prefer its root owner if Windows provides one.
+            if (string.Equals(consoleClass, "PseudoConsoleWindow", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    IntPtr rootOwner = GetAncestor(consoleWindow, GA_ROOTOWNER);
+                    if (rootOwner != IntPtr.Zero && rootOwner != consoleWindow && IsWindow(rootOwner))
+                    {
+                        source = "AttachConsole PseudoConsole root owner";
+                        windowClass = GetWindowClassName(rootOwner);
+                        return rootOwner;
+                    }
+                }
+                catch
+                {
+                    // Fall back to the PseudoConsoleWindow handle below. Some terminal versions
+                    // proxy ShowWindow calls through this window even though it is not rendered.
+                }
+            }
+
+            source = "AttachConsole/GetConsoleWindow";
+            windowClass = consoleClass;
+            return consoleWindow;
+        }
+
+        private string GetToggleConsoleDiagnosticPath()
+        {
+            return Path.Combine(
+                ServerPath.GetServersCache(_serverData.ServerID),
+                "arma3-toggle-console.log");
+        }
+
+        private void ResetToggleConsoleDiagnostic(Process process)
+        {
+            try
+            {
+                string path = GetToggleConsoleDiagnosticPath();
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                File.WriteAllText(
+                    path,
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") +
+                    " [0.1.2] Toggle Console monitor started for PID " + process.Id + Environment.NewLine);
+            }
+            catch
+            {
+                // Diagnostics must never interfere with server startup.
+            }
+        }
+
+        private void WriteToggleConsoleDiagnostic(string message)
+        {
+            try
+            {
+                string path = GetToggleConsoleDiagnosticPath();
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                File.AppendAllText(
+                    path,
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " " + message + Environment.NewLine);
+            }
+            catch
+            {
+                // Diagnostics must never interfere with server operation.
             }
         }
 
@@ -575,72 +782,114 @@ namespace WindowsGSM.Plugins
             }
         }
 
-        private async Task SynchronizeNativeConsoleHandle(Process process, ServerConsole serverConsole)
+        private async Task MonitorNativeConsoleHandle(Process process, ServerConsole serverConsole)
         {
             int serverId;
             if (!int.TryParse(Convert.ToString(_serverData.ServerID), out serverId))
                 return;
 
-            DateTime deadline = DateTime.UtcNow.AddSeconds(15);
-            int stableStartedChecks = 0;
-            bool handleRegistered = false;
+            ResetToggleConsoleDiagnostic(process);
 
-            while (DateTime.UtcNow < deadline)
+            IntPtr lastResolvedWindow = IntPtr.Zero;
+            string lastSource = string.Empty;
+            string lastClass = string.Empty;
+            DateTime unresolvedNoticeAt = DateTime.UtcNow.AddSeconds(15);
+            bool unresolvedNoticeShown = false;
+
+            while (true)
             {
                 try
                 {
                     if (process.HasExited)
+                    {
+                        WriteToggleConsoleDiagnostic("Arma process exited; Toggle Console monitor stopped.");
                         return;
+                    }
                 }
                 catch
                 {
+                    WriteToggleConsoleDiagnostic("Arma process state became unavailable; Toggle Console monitor stopped.");
                     return;
                 }
 
-                IntPtr consoleWindow = GetProcessConsoleWindow(process);
-                if (consoleWindow != IntPtr.Zero &&
-                    WindowsGSM.MainWindow._serverMetadata.ContainsKey(serverId))
+                string source;
+                string windowClass;
+                int attachError;
+                IntPtr resolvedWindow = ResolveToggleWindow(process, out source, out windowClass, out attachError);
+
+                if (resolvedWindow == IntPtr.Zero &&
+                    lastResolvedWindow != IntPtr.Zero &&
+                    IsWindow(lastResolvedWindow))
+                {
+                    resolvedWindow = lastResolvedWindow;
+                    source = lastSource + " (previous handle still valid)";
+                    windowClass = lastClass;
+                }
+
+                bool matchingProcessRegistered = false;
+                if (WindowsGSM.MainWindow._serverMetadata.ContainsKey(serverId))
                 {
                     try
                     {
                         var metadata = WindowsGSM.MainWindow._serverMetadata[serverId];
                         Process trackedProcess = metadata.Process;
+                        matchingProcessRegistered = trackedProcess != null && trackedProcess.Id == process.Id;
 
-                        if (trackedProcess != null && trackedProcess.Id == process.Id)
+                        if (matchingProcessRegistered && resolvedWindow != IntPtr.Zero)
                         {
-                            if (metadata.MainWindow != consoleWindow)
+                            if (metadata.MainWindow != resolvedWindow)
                             {
-                                metadata.MainWindow = consoleWindow;
-                                SaveWindowsGsmConsoleHandle(consoleWindow);
-                                stableStartedChecks = 0;
-                            }
-                            else if (metadata.ServerStatus == WindowsGSM.MainWindow.ServerStatus.Started)
-                            {
-                                stableStartedChecks++;
+                                IntPtr previousWindow = metadata.MainWindow;
+                                metadata.MainWindow = resolvedWindow;
+                                SaveWindowsGsmConsoleHandle(resolvedWindow);
+
+                                WriteToggleConsoleDiagnostic(
+                                    "WindowsGSM MainWindow updated from 0x" +
+                                    previousWindow.ToInt64().ToString("X") + " to 0x" +
+                                    resolvedWindow.ToInt64().ToString("X") +
+                                    " via " + source +
+                                    (string.IsNullOrWhiteSpace(windowClass) ? string.Empty : " [" + windowClass + "]") + ".");
                             }
 
-                            handleRegistered = true;
+                            if (lastResolvedWindow != resolvedWindow)
+                            {
+                                AddEmbeddedConsoleLine(
+                                    serverConsole,
+                                    "[WindowsGSM] Toggle Console window registered via " + source +
+                                    " (HWND 0x" + resolvedWindow.ToInt64().ToString("X") +
+                                    (string.IsNullOrWhiteSpace(windowClass) ? string.Empty : ", " + windowClass) + ").");
+                            }
 
-                            // Waiting for several stable checks after WindowsGSM reports Started
-                            // avoids racing its own initial MainWindowHandle assignment/cache write.
-                            if (stableStartedChecks >= 3)
-                                return;
+                            lastResolvedWindow = resolvedWindow;
+                            lastSource = source;
+                            lastClass = windowClass;
+                            unresolvedNoticeShown = false;
+                            unresolvedNoticeAt = DateTime.UtcNow.AddSeconds(15);
                         }
                     }
                     catch
                     {
-                        // WindowsGSM may still be finishing its start bookkeeping. Retry below.
+                        // WindowsGSM may be updating its metadata at the same time. Retry below.
                     }
                 }
 
-                await Task.Delay(500);
-            }
+                if (resolvedWindow == IntPtr.Zero &&
+                    DateTime.UtcNow >= unresolvedNoticeAt &&
+                    !unresolvedNoticeShown)
+                {
+                    string detail = attachError == 0
+                        ? "No usable native window was found."
+                        : "AttachConsole failed with Win32 error " + attachError + ".";
 
-            if (!handleRegistered)
-            {
-                AddEmbeddedConsoleLine(
-                    serverConsole,
-                    "[WindowsGSM] Native Arma console window could not be registered. Toggle Console may be unavailable for this run.");
+                    WriteToggleConsoleDiagnostic(
+                        detail + " WindowsGSM process registered=" + matchingProcessRegistered + ".");
+                    AddEmbeddedConsoleLine(
+                        serverConsole,
+                        "[WindowsGSM] Toggle Console could not resolve a usable native Arma window. See arma3-toggle-console.log in this server's cache folder.");
+                    unresolvedNoticeShown = true;
+                }
+
+                await Task.Delay(resolvedWindow == IntPtr.Zero ? 1000 : 5000);
             }
         }
 
@@ -705,7 +954,7 @@ namespace WindowsGSM.Plugins
                 p.Start();
 
 #pragma warning disable 4014
-                Task.Run(() => SynchronizeNativeConsoleHandle(p, serverConsole));
+                Task.Run(() => MonitorNativeConsoleHandle(p, serverConsole));
 #pragma warning restore 4014
 
                 if (AllowsEmbedConsole)
@@ -747,9 +996,17 @@ namespace WindowsGSM.Plugins
                 if (p.MainWindowHandle != IntPtr.Zero && p.CloseMainWindow())
                     return true;
 
-                IntPtr consoleWindow = GetProcessConsoleWindow(p);
-                return consoleWindow != IntPtr.Zero &&
-                       PostMessage(consoleWindow, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                string windowClass;
+                int attachError;
+                IntPtr consoleWindow = GetAttachedConsoleWindow(p, out windowClass, out attachError);
+
+                // Do not post WM_CLOSE to a terminal-host/pseudoconsole window. In that case the
+                // existing process-termination fallback is safer than closing somebody's terminal.
+                if (consoleWindow == IntPtr.Zero ||
+                    string.Equals(windowClass, "PseudoConsoleWindow", StringComparison.OrdinalIgnoreCase))
+                    return false;
+
+                return PostMessage(consoleWindow, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
             }
             catch
             {
