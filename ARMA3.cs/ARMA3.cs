@@ -684,9 +684,14 @@ namespace WindowsGSM.Plugins
                 IntPtr mainWindow = process.MainWindowHandle;
                 if (mainWindow != IntPtr.Zero && IsWindow(mainWindow))
                 {
-                    source = "Process.MainWindowHandle after Refresh";
-                    windowClass = GetWindowClassName(mainWindow);
-                    return mainWindow;
+                    string mainWindowClass = GetWindowClassName(mainWindow);
+                    if (IsWindowVisible(mainWindow) ||
+                        string.Equals(mainWindowClass, "ConsoleWindowClass", StringComparison.OrdinalIgnoreCase))
+                    {
+                        source = "Process.MainWindowHandle after Refresh";
+                        windowClass = mainWindowClass;
+                        return mainWindow;
+                    }
                 }
             }
             catch
