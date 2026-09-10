@@ -583,8 +583,8 @@ namespace WindowsGSM.Plugins
                 return IntPtr.Zero;
             }
 
-            IntPtr firstWindow = IntPtr.Zero;
-            IntPtr preferredWindow = IntPtr.Zero;
+            IntPtr visibleWindow = IntPtr.Zero;
+            IntPtr preferredConsoleWindow = IntPtr.Zero;
 
             try
             {
@@ -596,15 +596,15 @@ namespace WindowsGSM.Plugins
                     if (windowProcessId != (uint)processId || !IsWindow(hWnd))
                         return true;
 
-                    if (firstWindow == IntPtr.Zero)
-                        firstWindow = hWnd;
-
                     string className = GetWindowClassName(hWnd);
                     if (string.Equals(className, "ConsoleWindowClass", StringComparison.OrdinalIgnoreCase))
                     {
-                        preferredWindow = hWnd;
+                        preferredConsoleWindow = hWnd;
                         return false;
                     }
+
+                    if (visibleWindow == IntPtr.Zero && IsWindowVisible(hWnd))
+                        visibleWindow = hWnd;
 
                     return true;
                 }, IntPtr.Zero);
@@ -614,7 +614,7 @@ namespace WindowsGSM.Plugins
                 return IntPtr.Zero;
             }
 
-            return preferredWindow != IntPtr.Zero ? preferredWindow : firstWindow;
+            return preferredConsoleWindow != IntPtr.Zero ? preferredConsoleWindow : visibleWindow;
         }
 
         private static IntPtr GetAttachedConsoleWindow(Process process, out string windowClass, out int attachError)
